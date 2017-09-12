@@ -54,7 +54,7 @@ class AdditionEnv:
         op, row, value = np.argmax(arg[0:10]), np.argmax(arg[10:20]), np.argmax(arg[20:30])
 
         if show:
-            print('ACT({}, {}, {})'.format(op, row, value))
+            print(op, row, value)
 
         if row < 0 or 3 < row:
             return
@@ -69,12 +69,13 @@ class AdditionEnv:
         return [0.] * arg_size
 
     def __repr__(self):
-        return '<AdditionEnv {}>'.format(self.q)
+        return '<AdditionEnv {}>'.format('|'.join(' '.join(str(x)) for x in self.q))
 
 def operation(func):
-    def wrapper(self, eop, *args, **kwargs):
-        yield func.__name__.upper(), eop
+    def wrapper(self, *args, **kwargs):
+        yield func.__name__.upper()
         for x in func(self, *args, **kwargs): yield x
+        yield 'RETURN'
     return wrapper
 
 class AdditionPlayer:
@@ -85,42 +86,39 @@ class AdditionPlayer:
         self.env = env
 
     def play(self):
-        for op, eop in self.add(True):
-            yield self.env, op, eop
+        for op in self.add():
+            yield self.env, op
             if not isinstance(op, str):
                 self.env.act(0, op)
 
     @operation
     def add(self):
         s = self.env.a + self.env.b
-        if s == 0:
-            for x in self.lshift(True): yield x
-            return
-        l = len(str(s))
-        for i in range(l):
-            for x in self.add1(False): yield x
-            for x in self.lshift(i == l-1): yield x
+        if s > 0:
+            for i in range(len(str(s))):
+                for x in self.add1(): yield x
+                for x in self.lshift(): yield x
 
     @operation
     def add1(self):
         v = self.env.q[0][self.env.pointers[0]] + self.env.q[1][self.env.pointers[1]] + self.env.q[2][self.env.pointers[2]]
         s, c = v % 10, v // 10
-        yield self.arg(AdditionEnv.WRITE, 3, s), c == 0
+        yield self.arg(AdditionEnv.WRITE, 3, s)
         if c > 0:
-            for x in self.carry(True): yield x
+            for x in self.carry(): yield x
 
     @operation
     def carry(self):
-        yield self.arg(AdditionEnv.LEFT, 2, 0), False
-        yield self.arg(AdditionEnv.WRITE, 2, 1), False
-        yield self.arg(AdditionEnv.RIGHT, 2, 0), True
+        yield self.arg(AdditionEnv.LEFT, 2, 0)
+        yield self.arg(AdditionEnv.WRITE, 2, 1)
+        yield self.arg(AdditionEnv.RIGHT, 2, 0)
 
     @operation
     def lshift(self):
-        yield self.arg(AdditionEnv.LEFT, 0, 0), False
-        yield self.arg(AdditionEnv.LEFT, 1, 0), False
-        yield self.arg(AdditionEnv.LEFT, 2, 0), False
-        yield self.arg(AdditionEnv.LEFT, 3, 0), True
+        yield self.arg(AdditionEnv.LEFT, 0, 0)
+        yield self.arg(AdditionEnv.LEFT, 1, 0)
+        yield self.arg(AdditionEnv.LEFT, 2, 0)
+        yield self.arg(AdditionEnv.LEFT, 3, 0)
 
     def arg(self, x, y, z):
         return np.concatenate([self.eye10[x], self.eye10[y], self.eye10[z], [0., 0.]]) # hard-coded
@@ -134,10 +132,10 @@ class NPI:
         self.prog_emb_size = 16
         self.arg_size = 32
         self.eop_threshold = 0.5
-        self.d = 64 # XXX
+        self.d = 32 # XXX
         self.m = 256
 
-        self.prog_names = ['ACT'] + Env.PROGRAM_NAMES
+        self.prog_names = ['ACT', 'RETURN'] + Env.PROGRAM_NAMES
         self.prog_store = []
 
         initializer = None #tf.random_uniform_initializer(-0.01, 0.01)
@@ -171,16 +169,11 @@ class NPI:
         with tf.name_scope('prog_arg'):
             self.next_prog_arg = tf.layers.dense(self.output_state, 32, activation=tf.nn.elu) # env-specific
             self.next_prog_arg = tf.layers.dense(self.next_prog_arg, self.arg_size) # env-specific
-        with tf.name_scope('eop'):
-            self.eop_prob = tf.layers.dense(self.output_state, 1)
-            self.eop = tf.squeeze(self.eop_prob, axis=1)
-            self.eop = tf.greater(self.eop, self.eop_threshold)
 
         tf.summary.histogram('next_prog_id', self.next_prog_id)
 
         self.y_next_prog_id = tf.placeholder(tf.int32, shape=(None,))
         self.y_next_prog_arg = tf.placeholder(tf.float32, shape=(None, self.arg_size))
-        self.y_eop = tf.placeholder(tf.bool, shape=(None,))
 
         with tf.name_scope('loss'):
             '''
@@ -198,20 +191,16 @@ class NPI:
             self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
                 labels=tf.concat([
                     tf.one_hot(self.y_next_prog_id, self.MAX_NUM_PROGS),
-                    self.y_next_prog_arg,
-                    tf.expand_dims(tf.to_float(self.y_eop), 1)], axis=1),
+                    self.y_next_prog_arg], axis=1),
                 logits=tf.concat([
                     self.next_prog_prods,
-                    self.next_prog_arg,
-                    self.eop_prob], axis=1)))
+                    self.next_prog_arg], axis=1)))
 
             self.loss_without_arg = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
                 labels=tf.concat([
-                    tf.one_hot(self.y_next_prog_id, self.MAX_NUM_PROGS),
-                    tf.expand_dims(tf.to_float(self.y_eop), 1)], axis=1),
+                    tf.one_hot(self.y_next_prog_id, self.MAX_NUM_PROGS)], axis=1),
                 logits=tf.concat([
-                    self.next_prog_prods,
-                    self.eop_prob], axis=1)))
+                    self.next_prog_prods], axis=1)))
 
             ##tf.summary.scalar('loss', self.loss)
             tf.summary.scalar('loss_without_arg', self.loss_without_arg)
@@ -249,22 +238,20 @@ class NPI:
                 self.f_enc_input: [env.make_f_enc_input(arg)],
                 self.hidden_state: h
             }
-            sub_prog_id, sub_prog_arg, eop, h = sess.run(
-                [self.next_prog_id, self.next_prog_arg, self.eop, self.next_hidden_state],
+            sub_prog_id, sub_prog_arg, h = sess.run(
+                [self.next_prog_id, self.next_prog_arg, self.next_hidden_state],
                 feed_dict=feed_dict)
-            sub_prog_id, sub_prog_arg, eop = sub_prog_id[0], sub_prog_arg[0], eop[0]
-            #print(sub_prog_id, sub_prog_arg, eop)
+            sub_prog_id, sub_prog_arg = sub_prog_id[0], sub_prog_arg[0]
+            #print(sub_prog_id, sub_prog_arg)
 
             if sub_prog_id == 0: # is_act
-                #print('{}act {}'.format(, sub_prog_arg))
-                print('  ' * depth, end='')
+                #print('{}act {}'.format('  ' * depth, sub_prog_arg))
                 env.act(sub_prog_id, sub_prog_arg, show=True)
-            else:
-                step = self.interpret(sess, env, sub_prog_id, sub_prog_arg, depth + 1, step)
-
-            if eop:
+            elif sub_prog_id == 1: # tarminate
                 print('{}{} end.'.format('  ' * depth, self.prog_names[prog_id]))
                 break
+            else:
+                step = self.interpret(sess, env, sub_prog_id, sub_prog_arg, depth + 1, step)
 
         return step
 
@@ -281,14 +268,13 @@ class NPI:
                 self.hidden_state: h,
                 self.y_next_prog_id: [15],
                 self.y_next_prog_arg: [[0.]*9+[1.]+[0.]*9+[1.]+[0.]*9+[1.]+[0., 0.]],
-                self.y_eop: [False],
                 self.lr: 0.0001,
             }
-            sub_prog_id, sub_prog_arg, eop, h = sess.run(
-                [self.next_prog_id, self.next_prog_arg, self.eop, self.next_hidden_state],
+            sub_prog_id, sub_prog_arg, h = sess.run(
+                [self.next_prog_id, self.next_prog_arg, self.next_hidden_state],
                 feed_dict=feed_dict)
-            sub_prog_id, sub_prog_arg, eop = sub_prog_id[0], sub_prog_arg[0], eop[0]
-            print(sub_prog_id, np.argmax(sub_prog_arg[0:10]), np.argmax(sub_prog_arg[10:20]), np.argmax(sub_prog_arg[20:30]), eop)
+            sub_prog_id, sub_prog_arg = sub_prog_id[0], sub_prog_arg[0]
+            print(sub_prog_id, np.argmax(sub_prog_arg[0:10]), np.argmax(sub_prog_arg[10:20]), np.argmax(sub_prog_arg[20:30]))
 
             sess.run(self.optimize, feed_dict)
 
@@ -300,7 +286,8 @@ class NPI:
 
         h = np.zeros([1, self.rnn_cell.state_size])
         while True:
-            env, op, eop = next(play)
+            env, op = next(play)
+
             if not isinstance(op, str):
                 next_prog_arg = np.array(op, dtype=np.float32)
                 feed_dict = {
@@ -309,7 +296,6 @@ class NPI:
                     self.hidden_state: h,
                     self.y_next_prog_id: [0.],
                     self.y_next_prog_arg: [next_prog_arg],
-                    self.y_eop: [eop],
                     self.lr: 0.0001,
                 }
                 #_, loss, h = sess.run([self.optimize, self.loss, self.next_hidden_state], feed_dict)
@@ -317,8 +303,6 @@ class NPI:
 
                 global_steps += 1
                 self.writer.add_summary(w_summary, global_steps)
-
-                #env.act(0, next_prog_arg)
             else:
                 sub_prog_id = self.prog_names.index(op)
                 feed_dict = {
@@ -326,9 +310,9 @@ class NPI:
                     self.f_enc_input: [env.make_f_enc_input(arg)],
                     self.hidden_state: h,
                     self.y_next_prog_id: [sub_prog_id],
-                    self.y_eop: [eop],
                     self.lr: 0.0001,
                 }
+
                 #_, sub_prog_arg, loss, h = sess.run([self.optimize_without_arg, self.next_prog_arg, self.loss_without_arg, self.next_hidden_state], feed_dict)
                 _, sub_prog_arg, loss, w_summary, h = sess.run([self.optimize_without_arg, self.next_prog_arg, self.loss_without_arg, self.summary_op, self.next_hidden_state], feed_dict)
                 sub_prog_arg = sub_prog_arg[0]
@@ -336,13 +320,16 @@ class NPI:
                 global_steps += 1
                 self.writer.add_summary(w_summary, global_steps)
 
+                if op == 'RETURN':
+                    break
+
                 self.learn_(sess, env, play, sub_prog_id, sub_prog_arg)
 
-            if eop:
-                break
-
     def learn(self, sess, env, player):
-        self.learn_(sess, env, player.play(), self.prog_names.index('ADD'))
+        play = player.play()
+        env, op = next(play)
+        assert isinstance(op, str)
+        self.learn_(sess, env, play, self.prog_names.index(op))
 
 global_steps = 0
 
@@ -352,7 +339,7 @@ def main():
     env = AdditionEnv()
     print(env)
     #npi.reset(sess)
-    #npi.interpret(sess, env, 1)
+    #npi.interpret(sess, env, npi.prog_names.index('ADD'))
 
 def train_test():
     sess = tf.Session()
@@ -360,7 +347,7 @@ def train_test():
     npi.reset(sess)
     env = AdditionEnv()
     try:
-        npi.interpret_(sess, env, 1)
+        npi.interpret_(sess, env, npi.prog_names.index('ADD'))
     except:
         pass
 
@@ -370,19 +357,22 @@ def train():
         env = AdditionEnv(1, 2)
         print(env)
         try:
-            npi.interpret(sess, env, 1)
+            npi.interpret(sess, env, npi.prog_names.index('ADD'))
+            print(env)
         except: pass
 
         env = AdditionEnv(5, 6)
         print(env)
         try:
-            npi.interpret(sess, env, 1)
+            npi.interpret(sess, env, npi.prog_names.index('ADD'))
+            print(env)
         except: pass
 
         env = AdditionEnv(123, 45)
         print(env)
         try:
-            npi.interpret(sess, env, 1)
+            npi.interpret(sess, env, npi.prog_names.index('ADD'))
+            print(env)
         except: pass
 
     npi = NPI(AdditionEnv)
@@ -391,15 +381,15 @@ def train():
     npi.reset(sess)
     for i in range(10000):
         if i < 200:
-            n = 9998
+            n = 10000
         elif i < 300:
-            n = 4
+            n = 5
         elif i < 1000:
-            n = 8
+            n = 10
         elif i < 2000:
-            n = 98
+            n = 1000
         elif i < 4000:
-            n = 9998
+            n = 10000
         env = AdditionEnv(np.random.randint(0, n), np.random.randint(0, n))
 
         if i % 25 == 0:
@@ -421,4 +411,4 @@ if __name__ == '__main__':
     player = AdditionPlayer(env)
     for x in player.play():
         print(x)
-    '''
+    #'''
