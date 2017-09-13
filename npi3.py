@@ -4,11 +4,11 @@ import tensorflow as tf
 import numpy as np
 import math
 
-N = 5 # 基数 本来は 10
+N = 5 # radix, originally 10.
 
 class AdditionEnv:
 
-    EYEN = np.eye(N)
+    EYE_N = np.eye(N)
 
     LEFT, RIGHT, WRITE = range(3)
 
@@ -41,19 +41,16 @@ class AdditionEnv:
             input = tf.placeholder(tf.float32, shape=(None, None, input_size))
             flat_input = tf.reshape(input, [-1, input_size])
             layer1 = tf.layers.dense(flat_input, 256, activation=tf.nn.elu, name='f_enc_dense_1',
-                                     kernel_regularizer=tf.contrib.layers.l1_regularizer(0.05),
-                                     bias_regularizer=tf.contrib.layers.l1_regularizer(0.05))
-            layer2 = tf.layers.dense(layer1, npi.d, name='f_enc_dense_2',
-                                     kernel_regularizer=tf.contrib.layers.l1_regularizer(0.05),
-                                     bias_regularizer=tf.contrib.layers.l1_regularizer(0.05))
-        return input, layer2
+                                     kernel_regularizer=tf.contrib.layers.l1_regularizer(0.01),
+                                     bias_regularizer=tf.contrib.layers.l1_regularizer(0.01))
+        return input, layer1
 
     def make_f_enc_input(self, arg):
         return np.concatenate([
-            self.EYEN[self.q[0][self.pointers[0]]],
-            self.EYEN[self.q[1][self.pointers[1]]],
-            self.EYEN[self.q[2][self.pointers[2]]],
-            self.EYEN[self.q[3][self.pointers[3]]],
+            self.EYE_N[self.q[0][self.pointers[0]]],
+            self.EYE_N[self.q[1][self.pointers[1]]],
+            self.EYE_N[self.q[2][self.pointers[2]]],
+            self.EYE_N[self.q[3][self.pointers[3]]],
             arg
         ])
 
@@ -84,7 +81,7 @@ class AdditionEnv:
 
 class AdditionPlayer:
 
-    EYEN = np.eye(N)
+    EYE_N = np.eye(N)
 
     def __init__(self, env):
         self.env = env
@@ -134,40 +131,44 @@ class AdditionPlayer:
         act(AdditionEnv.LEFT, 2, 0)
         act(AdditionEnv.LEFT, 3, 0)
 
-    def arg_encode(self, x, y, z):
-        return np.concatenate([self.EYEN[x], self.EYEN[y], self.EYEN[z], [0.] * (32 - N*3)]) # hard-coded
+    @staticmethod
+    def arg_encode(x, y, z):
+        return np.concatenate([AdditionPlayer.EYE_N[x], AdditionPlayer.EYE_N[y], AdditionPlayer.EYE_N[z], [0.] * (32 - N*3)]) # hard-coded
 
     def arg_decode(self, x):
         return (np.argmax(x[0:N]), np.argmax(x[N:2*N]), np.argmax(x[2*N:3*N]))
 
 class NPI:
 
-    def __init__(self, Env):
-        self.num_progs_max = 32
-        self.prog_key_size = 5
-        self.prog_emb_size = 10
-        self.arg_size = 32
-        self.d = 32 # XXX
-        self.m = 256
-        self.Env = Env
+    num_progs_max = 32
+    prog_key_size = 5
+    prog_emb_size = 10
+    arg_size = 32
+    d = 32 # XXX
+    m = 256
 
+    def __init__(self, Env):
+        self.Env = Env
         self.prog_names = ['ACT', 'RETURN'] + Env.PROGRAM_NAMES
 
         self.build_core()
 
     def build_core(self):
         self.prog_keys = tf.get_variable('prog_keys', [self.prog_key_size, self.num_progs_max],
-                                         initializer=tf.random_normal_initializer(stddev=0.35))
+                                         initializer=tf.random_normal_initializer(stddev=0.35),
+                                         regularizer=tf.contrib.layers.l2_regularizer(0.05))
         self.prog_embs = tf.get_variable('prog_embs', [self.num_progs_max, self.prog_emb_size],
                                          initializer=tf.random_normal_initializer(stddev=0.35))
 
         tf.summary.histogram('prog_keys', self.prog_keys)
+        tf.summary.histogram('prog_embs', self.prog_embs)
 
         self.prog_id = tf.placeholder(tf.int32, shape=(None, None))
         flat_prog_id = tf.reshape(self.prog_id, [-1])
         self.f_enc_input, self.s = self.Env.build_f_enc(self)
         tf.summary.histogram('s', self.s)
         self.times = tf.placeholder(tf.int32, shape=(None,))
+        self.keep_prob = tf.placeholder(tf.float32, shape=None)
 
         self.batch_size = tf.shape(self.prog_id)[0]
         self.time_max = tf.shape(self.prog_id)[1]
@@ -178,7 +179,7 @@ class NPI:
         inputs = tf.reshape(inputs, [-1, self.time_max, self.m])
 
         cells = [tf.contrib.rnn.GRUCell(self.m) for _ in range(2)]
-        #cells = [tf.contrib.rnn.DropoutWrapper(cell, 0.7, variational_recurrent=True, dtype=tf.float32, input_size=self.m) for cell in cells]
+        cells = [tf.contrib.rnn.DropoutWrapper(cell, self.keep_prob, state_keep_prob=self.keep_prob, variational_recurrent=True, dtype=tf.float32, input_size=self.m) for cell in cells]
         self.cell = tf.contrib.rnn.MultiRNNCell(cells)
         self.hidden_state1 = tf.placeholder(tf.float32, shape=(None, self.m))
         self.hidden_state2 = tf.placeholder(tf.float32, shape=(None, self.m))
@@ -200,8 +201,7 @@ class NPI:
             flat_next_prog_id = tf.argmax(flat_next_prog_prods, axis=1)
             self.next_prog_id = tf.reshape(flat_next_prog_id, [-1, self.time_max])
         with tf.name_scope('prog_arg'):
-            flat_next_prog_id_oh = tf.one_hot(flat_next_prog_id, self.num_progs_max)
-            flat_next_prog_arg = tf.layers.dense(tf.concat([flat_outputs, flat_next_prog_id_oh], 1), self.arg_size,
+            flat_next_prog_arg = tf.layers.dense(flat_outputs, self.arg_size,
                                                  kernel_regularizer=tf.contrib.layers.l2_regularizer(0.1),
                                                  bias_regularizer=tf.contrib.layers.l2_regularizer(0.1)) # env-specific
             #flat_next_prog_arg = tf.layers.dense(flat_outputs, 64, activation=tf.nn.elu) # env-specific
@@ -226,7 +226,7 @@ class NPI:
             self.loss2 = tf.reduce_mean(tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
                 labels=self.true_next_prog_arg,
                 logits=self.next_prog_arg), 2) * mask)
-            self.regularization_loss = 0.1 * tf.losses.get_regularization_loss()
+            self.regularization_loss = 0.0001 * tf.losses.get_regularization_loss()
             self.loss = self.loss1 + self.loss2 + self.regularization_loss
 
             tf.summary.scalar('loss1', self.loss1)
@@ -235,6 +235,7 @@ class NPI:
             tf.summary.scalar('loss', self.loss)
 
         self.lr = tf.placeholder(tf.float32)
+        tf.summary.scalar('learning_rate', self.lr)
         optimizer = tf.train.AdamOptimizer(self.lr)
 
         gvs = optimizer.compute_gradients(self.loss)
@@ -268,7 +269,8 @@ class NPI:
                     self.f_enc_input: [[env.make_f_enc_input(arg)]],
                     self.times: [1],
                     self.hidden_state1: h1,
-                    self.hidden_state2: h2
+                    self.hidden_state2: h2,
+                    self.keep_prob: 1.0
                 })
             #print(sub_prog_id, sub_prog_arg)
 
@@ -326,7 +328,9 @@ class NPI:
                 self.times: times,
                 self.hidden_state1: h1,
                 self.hidden_state2: h2,
-                self.lr: 0.001 * 0.998 ** global_steps, # 0.998 がちょうどよい
+                #self.lr: 0.001 * 0.998 ** global_steps,
+                self.lr: 0.0002 * 0.99995 ** global_steps,
+                self.keep_prob: 0.5
             })
 
         global_steps += 1
@@ -378,18 +382,10 @@ def train():
             data.extend(player.make_data())
         return data
 
-    for i in range(10000):
+    for i in range(100000):
         if i % 25 == 0:
             print(i)
 
-        if i < 300:
-            n = 5
-        elif i < 1000:
-            n = 10
-        elif i < 2000:
-            n = 1000
-        elif i < 4000:
-            n = 10000
         n = 100
 
         npi.learn(sess, make_batch(n, 10))
