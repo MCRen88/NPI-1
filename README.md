@@ -1,5 +1,7 @@
 # a Neural Programmer-Interpreters implementation with Tensorflow
 
+paper: https://arxiv.org/abs/1511.06279
+
 This implementation can learn only Addition task.
 One major difference from the original is that this model does not compute the termination probability. Instead that have RETURN command as sub-program.
 
