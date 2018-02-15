@@ -109,7 +109,7 @@ class AdditionPlayer:
     def add(self, act, call):
         s = self.env.a + self.env.b
         if s > 0:
-            for i in range(math.floor(math.log(s, 10)) + 1):
+            for i in range(math.floor(math.log(s, N)) + 1):
                 call(self.add1, (0, 0, 0))
                 call(self.lshift, (0, 0, 0))
 
@@ -189,7 +189,7 @@ class NPI:
 
         flat_outputs = tf.reshape(outputs, [-1, self.m])
 
-        flat_outputs = tf.layers.dense(flat_outputs, 64,
+        flat_outputs = tf.layers.dense(flat_outputs, 64, activation=tf.nn.elu,
                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(0.1),
                                        bias_regularizer=tf.contrib.layers.l2_regularizer(0.1))
 
@@ -328,8 +328,7 @@ class NPI:
                 self.times: times,
                 self.hidden_state1: h1,
                 self.hidden_state2: h2,
-                #self.lr: 0.001 * 0.998 ** global_steps,
-                self.lr: 0.0002 * 0.99995 ** global_steps,
+                self.lr: 0.001,
                 self.keep_prob: 0.5
             })
 
